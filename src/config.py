@@ -1,0 +1,63 @@
+"""
+Configuration module for the customer support automation project.
+"""
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Project root directory (one level above /src)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
+DATA_DIR = PROJECT_ROOT / "data"
+
+# Data paths (using relative paths)
+DATA_PATH = DATA_DIR / "twcs.csv"
+
+# Gemini API configuration
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise ValueError("Please set GEMINI_API_KEY in your .env file.")
+
+GEMINI_MODEL_NAME = "gemini-2.0-flash"
+
+# Labeling configuration
+N_LABEL_SAMPLES = 50  # Increased from 10 for better model performance
+
+# Model configuration
+RANDOM_STATE = 42
+TEST_SIZE = 0.2
+
+# Baseline model (Logistic Regression + TF-IDF) parameters
+TFIDF_MAX_FEATURES = 20000
+TFIDF_NGRAM_RANGE = (1, 2)
+LOGISTIC_REGRESSION_MAX_ITER = 200
+
+# LSTM/GRU parameters
+MAX_SEQUENCE_LENGTH = 100
+EMBEDDING_DIM = 128
+LSTM_UNITS = 64
+DROPOUT_RATE = 0.3
+BATCH_SIZE = 32
+EPOCHS = 10
+VALIDATION_SPLIT = 0.2
+
+# BERT/DistilBERT parameters
+BERT_MODEL_NAME = "distilbert-base-uncased"  # Using DistilBERT for faster training
+BERT_MAX_LENGTH = 128
+BERT_BATCH_SIZE = 16
+BERT_EPOCHS = 3
+BERT_LEARNING_RATE = 2e-5
+
+# Hyperparameter tuning
+GRID_SEARCH_CV = 3  # Cross-validation folds for grid search
+EARLY_STOPPING_PATIENCE = 3
+
+# Data augmentation
+AUGMENTATION_SAMPLES_PER_CLASS = 5  # Number of synthetic samples per underrepresented class
+
+# Evaluation
+EVAL_METRICS = ['accuracy', 'precision', 'recall', 'f1']
+HUMAN_RATING_SCALE = (1, 5)  # 1-5 scale for human quality ratings
+
+# API rate limiting
+API_DELAY = 0.1  # Delay between API calls in seconds
