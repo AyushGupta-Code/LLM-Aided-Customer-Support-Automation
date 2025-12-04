@@ -30,6 +30,7 @@ LOGISTIC_REGRESSION_MAX_ITER = 200
 
 # Zero-shot model
 ZERO_SHOT_MODEL_NAME = "facebook/bart-large-mnli"
+ZERO_SHOT_ENABLED = False  # Disabled by default (slow); enable via CLI/env if needed
 
 # LSTM/GRU parameters
 RNN_MAX_VOCAB_SIZE = 20000

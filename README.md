@@ -33,6 +33,13 @@ python src/visualize_results_summary.py
 ```
 PNG plots land in `figures/`.
 
+Notes:
+- Zero-shot classifier is optional and slow (downloads Bart MNLI). Enable when needed:
+  ```
+  python src/main.py --zero-shot
+  ```
+  or set `ZERO_SHOT_ENABLED=True` in `src/config.py`.
+
 ### Generate TWCS dataset visuals
 Quick EDA plots for the raw `twcs.csv` live in `figures/` (monthly volume, inbound/outbound split, top support handles, inbound tweet lengths):
 ```

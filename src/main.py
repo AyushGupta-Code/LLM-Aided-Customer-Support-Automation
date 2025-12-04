@@ -13,6 +13,7 @@ Results are printed and saved to `results_summary.csv`.
 """
 from __future__ import annotations
 
+import argparse
 import logging
 from pathlib import Path
 from typing import Dict
@@ -185,11 +186,11 @@ class ZeroShotModel:
         return np.array(prob_list)
 
 
-def build_model_registry() -> Dict[str, Pipeline]:
+def build_model_registry(use_zero_shot: bool) -> Dict[str, Pipeline]:
     """
     Create the 5 model definitions:
       - 3 TF-IDF + linear models
-      - 1 Zero-shot classifier (NLI)
+      - 1 Zero-shot classifier (NLI) [optional]
       - 1 RNN+LSTM classifier
     """
     return {
@@ -219,7 +220,11 @@ def build_model_registry() -> Dict[str, Pipeline]:
                 ),
             ]
         ),
-        "zero_shot": ZeroShotModel(task_type="intent"),
+        **(
+            {"zero_shot": ZeroShotModel(task_type="intent")}
+            if use_zero_shot
+            else {}
+        ),
         # Slot formerly used by sgd_hinge replaced with RNN+LSTM
         "rnn_lstm": None,
         "multinomial_nb": Pipeline(
@@ -339,7 +344,9 @@ def _train_rnn_lstm(
 
 
 def train_and_evaluate_models(
-    labeled_df: pd.DataFrame, target_col: str
+    labeled_df: pd.DataFrame,
+    target_col: str,
+    use_zero_shot: bool,
 ) -> Dict[str, Dict[str, float]]:
     """
     Train/evaluate all registered models for a given target column.
@@ -356,7 +363,7 @@ def train_and_evaluate_models(
     )
 
     results: Dict[str, Dict[str, float]] = {}
-    registry = build_model_registry()
+    registry = build_model_registry(use_zero_shot=use_zero_shot)
     for name, pipeline in registry.items():
         logger.info("Training %s model: %s", target_col, name)
 
@@ -412,17 +419,29 @@ def save_results(intent_results: Dict[str, Dict[str, float]], severity_results: 
     return out_path
 
 
-def main():
+def main(use_zero_shot: bool = config.ZERO_SHOT_ENABLED):
     labeled_df = load_manual_labels()
     logger.info("Starting training on manual labels (no Gemini).")
 
-    intent_results = train_and_evaluate_models(labeled_df, target_col="intent")
+    intent_results = train_and_evaluate_models(
+        labeled_df, target_col="intent", use_zero_shot=use_zero_shot
+    )
     severity_results = train_and_evaluate_models(
-        labeled_df, target_col="severity"
+        labeled_df, target_col="severity", use_zero_shot=use_zero_shot
     )
 
     save_results(intent_results, severity_results)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="Train models on manual_labels.csv and save metrics."
+    )
+    parser.add_argument(
+        "--zero-shot",
+        action="store_true",
+        help="Include zero-shot classifier (Bart MNLI). Slow; downloads model.",
+    )
+    args = parser.parse_args()
+
+    main(use_zero_shot=args.zero_shot or config.ZERO_SHOT_ENABLED)
