@@ -2,12 +2,12 @@
 Train five text classification models on manually labeled tweets (no Gemini).
 
 The script loads `data/manual_labels.csv` as ground truth, preprocesses the
-text, splits into train/test sets, and trains the following TF-IDF pipelines:
-  1) Logistic Regression (multinomial)
-  2) Linear SVM (LinearSVC)
-  3) SGDClassifier (logistic loss)
-  4) SGDClassifier (hinge/SVM-style)
-  5) Multinomial Naive Bayes
+text, splits into train/test sets, and trains the following models:
+  1) Logistic Regression (multinomial, TF-IDF)
+  2) Linear SVM (LinearSVC, TF-IDF)
+  3) SGDClassifier (logistic loss, TF-IDF)
+  4) RNN + Bidirectional LSTM
+  5) Multinomial Naive Bayes (TF-IDF)
 
 Results are printed and saved to `results_summary.csv`.
 """
@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Dict
 import sys
 
+import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression, SGDClassifier
@@ -25,6 +26,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import Pipeline
 from sklearn.svm import LinearSVC
+from sklearn.preprocessing import LabelEncoder
 
 # Ensure imports work regardless of CWD (e.g., running from src/).
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -114,7 +116,7 @@ def _safe_train_test_split(
 
 
 # -----------------------------------------------------------------------------
-# Models
+# Models (classical + RNN)
 # -----------------------------------------------------------------------------
 def _tfidf_vectorizer() -> TfidfVectorizer:
     return TfidfVectorizer(
@@ -125,7 +127,9 @@ def _tfidf_vectorizer() -> TfidfVectorizer:
 
 def build_model_registry() -> Dict[str, Pipeline]:
     """
-    Create the 5 TF-IDF model pipelines.
+    Create the 5 model definitions:
+      - 4 TF-IDF + linear models
+      - 1 RNN+LSTM classifier
     """
     return {
         "log_reg": Pipeline(
@@ -160,19 +164,8 @@ def build_model_registry() -> Dict[str, Pipeline]:
                 ),
             ]
         ),
-        "sgd_hinge": Pipeline(
-            [
-                ("tfidf", _tfidf_vectorizer()),
-                (
-                    "clf",
-                    SGDClassifier(
-                        loss="hinge",
-                        max_iter=2000,
-                        random_state=config.RANDOM_STATE,
-                    ),
-                ),
-            ]
-        ),
+        # Slot formerly used by sgd_hinge replaced with RNN+LSTM
+        "rnn_lstm": None,
         "multinomial_nb": Pipeline(
             [
                 ("tfidf", _tfidf_vectorizer()),
@@ -180,6 +173,116 @@ def build_model_registry() -> Dict[str, Pipeline]:
             ]
         ),
     }
+
+
+def _train_rnn_lstm(
+    X_train,
+    y_train,
+    X_test,
+    y_test,
+    task_name: str,
+):
+    """
+    Train a simple RNN+Bidirectional LSTM classifier.
+    """
+    try:
+        import tensorflow as tf
+        from tensorflow.keras import layers, models
+        from tensorflow.keras.preprocessing.sequence import pad_sequences
+        from tensorflow.keras.preprocessing.text import Tokenizer
+        from tensorflow.keras.callbacks import EarlyStopping
+    except ImportError as exc:
+        raise ImportError(
+            "TensorFlow is required for the RNN+LSTM model. "
+            "Install it via `pip install tensorflow`."
+        ) from exc
+
+    # Tokenize
+    tokenizer = Tokenizer(num_words=config.RNN_MAX_VOCAB_SIZE, oov_token="<OOV>")
+    tokenizer.fit_on_texts(X_train)
+    X_train_seq = pad_sequences(
+        tokenizer.texts_to_sequences(X_train),
+        maxlen=config.MAX_SEQUENCE_LENGTH,
+        padding="post",
+        truncating="post",
+    )
+    X_test_seq = pad_sequences(
+        tokenizer.texts_to_sequences(X_test),
+        maxlen=config.MAX_SEQUENCE_LENGTH,
+        padding="post",
+        truncating="post",
+    )
+
+    # Encode labels if needed
+    label_encoder = None
+    y_train_enc = y_train
+    y_test_enc = y_test
+    if y_train.dtype.kind not in {"i", "u"}:
+        label_encoder = LabelEncoder()
+        label_encoder.fit(list(y_train) + list(y_test))
+        y_train_enc = label_encoder.transform(y_train)
+        y_test_enc = label_encoder.transform(y_test)
+
+    num_classes = len(set(y_train_enc))
+    activation = "sigmoid" if num_classes == 2 else "softmax"
+    loss = "binary_crossentropy" if num_classes == 2 else "sparse_categorical_crossentropy"
+
+    model = models.Sequential(
+        [
+            layers.Embedding(
+                input_dim=config.RNN_MAX_VOCAB_SIZE,
+                output_dim=config.EMBEDDING_DIM,
+                input_length=config.MAX_SEQUENCE_LENGTH,
+            ),
+            layers.Bidirectional(layers.LSTM(config.LSTM_UNITS, return_sequences=True)),
+            layers.Dropout(config.DROPOUT_RATE),
+            layers.Bidirectional(layers.LSTM(config.LSTM_UNITS)),
+            layers.Dropout(config.DROPOUT_RATE),
+            layers.Dense(64, activation="relu"),
+            layers.Dropout(config.DROPOUT_RATE),
+            layers.Dense(num_classes if num_classes > 2 else 1, activation=activation),
+        ]
+    )
+
+    model.compile(optimizer="adam", loss=loss, metrics=["accuracy"])
+
+    callbacks = [
+        EarlyStopping(
+            monitor="val_loss",
+            patience=config.EARLY_STOPPING_PATIENCE,
+            restore_best_weights=True,
+        )
+    ]
+
+    model.fit(
+        X_train_seq,
+        y_train_enc,
+        epochs=config.EPOCHS,
+        batch_size=config.BATCH_SIZE,
+        validation_split=config.VALIDATION_SPLIT,
+        callbacks=callbacks,
+        verbose=0,
+    )
+
+    # Predictions
+    proba = model.predict(X_test_seq, verbose=0)
+    if num_classes == 2:
+        scores = proba.flatten()
+        y_pred_enc = (scores >= 0.5).astype(int)
+        y_proba = np.vstack([1 - scores, scores]).T
+    else:
+        y_pred_enc = proba.argmax(axis=1)
+        y_proba = proba
+
+    if label_encoder:
+        y_pred = label_encoder.inverse_transform(y_pred_enc)
+    else:
+        y_pred = y_pred_enc
+
+    evaluator = evaluation.ModelEvaluator(task_type=f"{task_name} (rnn_lstm)")
+    metrics = evaluator.calculate_metrics(y_test, y_pred, y_proba)
+    evaluator.print_metrics_summary()
+    return metrics
 
 
 def train_and_evaluate_models(
@@ -203,6 +306,12 @@ def train_and_evaluate_models(
     registry = build_model_registry()
     for name, pipeline in registry.items():
         logger.info("Training %s model: %s", target_col, name)
+
+        if name == "rnn_lstm":
+            metrics = _train_rnn_lstm(X_train, y_train, X_test, y_test, target_col)
+            results[name] = metrics
+            continue
+
         pipeline.fit(X_train, y_train)
         y_pred = pipeline.predict(X_test)
 
