@@ -1,9 +1,9 @@
-# LLM-Aided Customer Support Automation
+# Customer Support Intent/Severity Classification
 
-Classifies customer tweets by intent and severity (0–3) and drafts brief, empathetic replies using Gemini. Models include a fast TF‑IDF + Logistic Regression baseline, with optional LSTM and DistilBERT tiers.
+Classifies customer tweets by intent and severity (0–3) using the manually labeled ground-truth dataset (no Gemini/LLM labeling). Five TF‑IDF models are trained: Logistic Regression, Linear SVM, SGD (logistic), SGD (hinge), and Multinomial Naive Bayes.
 
 ## How to Run
-Prereqs: Python 3.10+, a virtual environment, Gemini API key, and the dataset file `data/twcs.csv` (download it manually from Kaggle: Customer Support on Twitter).
+Prereqs: Python 3.10+, a virtual environment, and the dataset files `data/manual_labels.csv` (ground truth) plus `data/twcs.csv` if you want the optional TWCS visuals (download it manually from Kaggle: Customer Support on Twitter).
 
 1) Create and activate a virtual env, then install deps:
    - Conda:
@@ -20,17 +20,12 @@ Prereqs: Python 3.10+, a virtual environment, Gemini API key, and the dataset fi
    ```
    pip install -r requirements.txt
    ```
-2) Create `.env` in the repo root with:
-   ```
-   GEMINI_API_KEY=your_api_key_here
-   ```
-3) Place `twcs.csv` in `data/` (no download commands here).
-4) From the repo root, run:
+2) Place `manual_labels.csv` in `data/` (already committed for convenience). If you also want to regenerate TWCS visuals, place `twcs.csv` in `data/`.
+3) Train/evaluate all five models on manual labels:
    ```
    python src/main.py
    ```
-
-The script labels a subset with Gemini (size set in `src/config.py`), preprocesses, trains, evaluates, saves figures to `figures/`, and stores trained models in `models/`.
+   Metrics for each model/task are printed and saved to `results_summary.csv`.
 
 ### Generate TWCS dataset visuals
 Quick EDA plots for the raw `twcs.csv` live in `figures/` (monthly volume, inbound/outbound split, top support handles, inbound tweet lengths):

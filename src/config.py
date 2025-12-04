@@ -3,25 +3,21 @@ Configuration module for the customer support automation project.
 """
 import os
 from pathlib import Path
-from dotenv import load_dotenv
 
 # Project root directory (one level above /src)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(PROJECT_ROOT / ".env")
 DATA_DIR = PROJECT_ROOT / "data"
 
 # Data paths (using relative paths)
 DATA_PATH = DATA_DIR / "twcs.csv"
+MANUAL_LABELS_PATH = DATA_DIR / "manual_labels.csv"
 
-# Gemini API configuration
+# Gemini configuration (legacy; optional for any future experiments)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise ValueError("Please set GEMINI_API_KEY in your .env file.")
+GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash")
 
-GEMINI_MODEL_NAME = "gemini-2.0-flash"
-
-# Labeling configuration
-N_LABEL_SAMPLES = 50  # Increased from 10 for better model performance
+# Manual labeling configuration
+N_LABEL_SAMPLES = 50  # No longer used for Gemini; kept for backward compatibility
 
 # Model configuration
 RANDOM_STATE = 42
