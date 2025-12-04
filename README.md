@@ -38,7 +38,7 @@ Notes:
   ```
   python src/main.py --zero-shot
   ```
-  or set `ZERO_SHOT_ENABLED=True` in `src/config.py`.
+  or set `ZERO_SHOT_ENABLED=True` in `src/config.py`. The default zero-shot model is a lighter DistilBERT MNLI variant for speed.
 
 ### Generate TWCS dataset visuals
 Quick EDA plots for the raw `twcs.csv` live in `figures/` (monthly volume, inbound/outbound split, top support handles, inbound tweet lengths):

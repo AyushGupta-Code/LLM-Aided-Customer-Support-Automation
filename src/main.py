@@ -149,6 +149,9 @@ class ZeroShotModel:
             model=self.model_name,
             framework="pt",
             device=-1,  # CPU
+            batch_size=getattr(config, "ZERO_SHOT_BATCH_SIZE", 8),
+            truncation=True,
+            max_length=getattr(config, "ZERO_SHOT_MAX_LENGTH", 128),
         )
         self.label_map: Dict[str, object] = {}
         self.candidate_labels: list[str] = []
