@@ -2,6 +2,8 @@
 Visualization module for generating charts, plots, and analysis figures.
 Required for presentation deliverables per grading rubric.
 """
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -9,8 +11,11 @@ import seaborn as sns
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 from sklearn.metrics import (
-    confusion_matrix, roc_curve, auc, precision_recall_curve,
-    classification_report
+    confusion_matrix,
+    roc_curve,
+    auc,
+    precision_recall_curve,
+    classification_report,
 )
 from . import config
 
@@ -43,6 +48,7 @@ class VisualizationGenerator:
         labels: Optional[List] = None,
         title: str = "Confusion Matrix",
         task_type: str = "intent",
+        normalize: Optional[str] = None,
         save: bool = True,
     ) -> None:
         """
@@ -54,30 +60,45 @@ class VisualizationGenerator:
             labels: Label names (optional)
             title: Plot title
             task_type: Type of task (intent/severity)
+            normalize: None, 'true', 'pred', or 'all' (sklearn style)
             save: Whether to save the figure
         """
-        cm = confusion_matrix(y_true, y_pred)
+        cm = confusion_matrix(y_true, y_pred, labels=labels, normalize=normalize)
 
         if labels is None:
             labels = sorted(set(y_true) | set(y_pred))
 
         plt.figure(figsize=(10, 8))
+
+        if normalize is None:
+            fmt = "d"
+            cbar_label = "Count"
+        else:
+            fmt = ".2f"
+            cbar_label = "Proportion"
+
         sns.heatmap(
             cm,
             annot=True,
-            fmt="d",
+            fmt=fmt,
             cmap="Blues",
             xticklabels=labels,
             yticklabels=labels,
-            cbar_kws={"label": "Count"},
+            cbar_kws={"label": cbar_label},
         )
-        plt.title(f"{title} - {task_type.upper()}", fontsize=14, fontweight="bold")
+        norm_str = "" if normalize is None else f" (normalized: {normalize})"
+        plt.title(
+            f"{title} - {task_type.upper()}{norm_str}",
+            fontsize=14,
+            fontweight="bold",
+        )
         plt.ylabel("True Label", fontsize=12)
         plt.xlabel("Predicted Label", fontsize=12)
         plt.tight_layout()
 
         if save:
-            filename = self.output_dir / f"confusion_matrix_{task_type}.png"
+            suffix = f"_{normalize}" if normalize else ""
+            filename = self.output_dir / f"confusion_matrix_{task_type}{suffix}.png"
             plt.savefig(filename, dpi=300, bbox_inches="tight")
             print(f"Saved confusion matrix to {filename}")
             plt.close()
@@ -144,7 +165,8 @@ class VisualizationGenerator:
             from sklearn.preprocessing import label_binarize
             from itertools import cycle
 
-            y_bin = label_binarize(y_true, classes=sorted(set(y_true)))
+            classes_sorted = sorted(set(y_true))
+            y_bin = label_binarize(y_true, classes=classes_sorted)
             n_classes = y_bin.shape[1]
 
             fpr = {}
@@ -199,6 +221,131 @@ class VisualizationGenerator:
                 filename = self.output_dir / f"roc_curve_{task_type}.png"
                 plt.savefig(filename, dpi=300, bbox_inches="tight")
                 print(f"Saved ROC curve to {filename}")
+                plt.close()
+            else:
+                plt.show()
+
+    # ------------------------------------------------------------------
+    # New: per-class metrics bar chart (precision / recall / F1)
+    # ------------------------------------------------------------------
+    def plot_per_class_metrics(
+        self,
+        y_true,
+        y_pred,
+        task_type: str = "intent",
+        labels: Optional[List[str]] = None,
+        save: bool = True,
+    ) -> None:
+        """
+        Plot per-class precision, recall, and F1 scores as a grouped bar chart.
+
+        Args:
+            y_true: True labels
+            y_pred: Predicted labels
+            task_type: 'intent' or 'severity'
+            labels: Optional explicit label order
+            save: Whether to save the figure
+        """
+        report = classification_report(
+            y_true, y_pred, output_dict=True, zero_division=0
+        )
+        report_df = pd.DataFrame(report).T
+
+        # Drop overall rows
+        per_class = report_df.iloc[:-3][["precision", "recall", "f1-score"]]
+
+        if labels is not None:
+            # Ensure we preserve the desired order and only keep those labels
+            per_class = per_class.reindex(labels)
+
+        plt.figure(figsize=(10, 6))
+        per_class.plot(kind="bar")
+        plt.title(
+            f"Per-class Precision / Recall / F1 - {task_type.upper()}",
+            fontsize=14,
+            fontweight="bold",
+        )
+        plt.xticks(rotation=45, ha="right")
+        plt.ylabel("Score")
+        plt.ylim(0, 1.0)
+        plt.legend(title="")
+        plt.grid(axis="y", alpha=0.3)
+        plt.tight_layout()
+
+        if save:
+            filename = self.output_dir / f"per_class_metrics_{task_type}.png"
+            plt.savefig(filename, dpi=300, bbox_inches="tight")
+            print(f"Saved per-class metrics plot to {filename}")
+            plt.close()
+        else:
+            plt.show()
+
+    # ------------------------------------------------------------------
+    # New: training curves for RNN (loss & accuracy vs epochs)
+    # ------------------------------------------------------------------
+    def plot_training_curves(
+        self,
+        history: Any,
+        task_name: str = "RNN-LSTM",
+        save: bool = True,
+    ) -> None:
+        """
+        Plot training & validation loss / accuracy curves.
+
+        Args:
+            history: Keras History object, dict, or DataFrame with keys/cols:
+                     'loss', 'val_loss', 'accuracy', 'val_accuracy'
+            task_name: Name to show in plot titles
+            save: Whether to save figures
+        """
+        # Normalize to a dict of lists
+        if hasattr(history, "history"):  # Keras History
+            h = history.history
+        elif isinstance(history, pd.DataFrame):
+            h = {col: history[col].tolist() for col in history.columns}
+        elif isinstance(history, dict):
+            h = history
+        else:
+            raise ValueError("Unsupported history type")
+
+        epochs = range(1, len(h.get("loss", [])) + 1)
+
+        # Loss
+        if "loss" in h and "val_loss" in h:
+            plt.figure(figsize=(6, 4))
+            plt.plot(epochs, h["loss"], label="Train loss")
+            plt.plot(epochs, h["val_loss"], label="Val loss")
+            plt.xlabel("Epoch")
+            plt.ylabel("Loss")
+            plt.title(f"{task_name} - Loss Curves", fontsize=14, fontweight="bold")
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+
+            if save:
+                filename = self.output_dir / f"{task_name.lower().replace(' ', '_')}_loss_curves.png"
+                plt.savefig(filename, dpi=300, bbox_inches="tight")
+                print(f"Saved training loss curves to {filename}")
+                plt.close()
+            else:
+                plt.show()
+
+        # Accuracy
+        if "accuracy" in h and "val_accuracy" in h:
+            plt.figure(figsize=(6, 4))
+            plt.plot(epochs, h["accuracy"], label="Train accuracy")
+            plt.plot(epochs, h["val_accuracy"], label="Val accuracy")
+            plt.xlabel("Epoch")
+            plt.ylabel("Accuracy")
+            plt.title(f"{task_name} - Accuracy Curves", fontsize=14, fontweight="bold")
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+
+            if save:
+                filename = self.output_dir / f"{task_name.lower().replace(' ', '_')}_accuracy_curves.png"
+                plt.savefig(filename, dpi=300, bbox_inches="tight")
+                print(f"Saved training accuracy curves to {filename}")
                 plt.close()
             else:
                 plt.show()
@@ -588,6 +735,103 @@ class VisualizationGenerator:
             filename = self.output_dir / "data_distribution.png"
             plt.savefig(filename, dpi=300, bbox_inches="tight")
             print(f"Saved data distribution plot to {filename}")
+            plt.close()
+        else:
+            plt.show()
+
+    # ------------------------------------------------------------------
+    # New: Intent × Severity heatmap
+    # ------------------------------------------------------------------
+    def plot_intent_severity_heatmap(
+        self,
+        labeled_df: pd.DataFrame,
+        normalize: bool = True,
+        save: bool = True,
+    ) -> None:
+        """
+        Plot heatmap of severity distribution within each intent.
+
+        Args:
+            labeled_df: DataFrame with 'intent' and 'severity' columns
+            normalize: If True, normalize counts by row (intent)
+            save: Whether to save the figure
+        """
+        crosstab = pd.crosstab(
+            labeled_df["intent"], labeled_df["severity"], normalize="index" if normalize else False
+        )
+
+        plt.figure(figsize=(8, 5))
+        sns.heatmap(
+            crosstab,
+            annot=True,
+            fmt=".2f" if normalize else "d",
+            cmap="YlGnBu",
+            cbar_kws={"label": "Proportion" if normalize else "Count"},
+        )
+        plt.title("Severity Distribution Within Each Intent", fontsize=14, fontweight="bold")
+        plt.ylabel("Intent")
+        plt.xlabel("Severity")
+        plt.tight_layout()
+
+        if save:
+            filename = self.output_dir / "intent_severity_heatmap.png"
+            plt.savefig(filename, dpi=300, bbox_inches="tight")
+            print(f"Saved intent-severity heatmap to {filename}")
+            plt.close()
+        else:
+            plt.show()
+
+    # ------------------------------------------------------------------
+    # New: Agreement-by-class bar chart (e.g., RNN vs Gemini/manual)
+    # ------------------------------------------------------------------
+    def plot_agreement_by_label(
+        self,
+        y_true,
+        y_pred,
+        task_type: str = "intent",
+        labels: Optional[List[str]] = None,
+        save: bool = True,
+    ) -> None:
+        """
+        Plot agreement rate (accuracy) for each true class.
+
+        This is effectively recall, but framed as "agreement rate"
+        which is nicer to explain in a presentation.
+
+        Args:
+            y_true: Ground truth labels (e.g., from manual_labels.csv)
+            y_pred: Model predictions
+            task_type: 'intent' or 'severity'
+            labels: Optional explicit label order
+            save: Whether to save the figure
+        """
+        df = pd.DataFrame({"true": y_true, "pred": y_pred})
+        df["agree"] = (df["true"] == df["pred"]).astype(float)
+
+        if labels is None:
+            labels = sorted(df["true"].unique())
+
+        agreement = (
+            df.groupby("true")["agree"].mean()
+            .reindex(labels)
+            .reset_index()
+            .rename(columns={"true": "label", "agree": "agreement"})
+        )
+
+        plt.figure(figsize=(8, 4))
+        sns.barplot(x="label", y="agreement", data=agreement)
+        plt.ylim(0, 1.0)
+        plt.ylabel("Agreement Rate")
+        plt.xlabel(f"True {task_type.title()}")
+        plt.title(f"Agreement by {task_type.title()} Class", fontsize=14, fontweight="bold")
+        plt.xticks(rotation=45, ha="right")
+        plt.grid(axis="y", alpha=0.3)
+        plt.tight_layout()
+
+        if save:
+            filename = self.output_dir / f"agreement_by_{task_type}.png"
+            plt.savefig(filename, dpi=300, bbox_inches="tight")
+            print(f"Saved agreement-by-class plot to {filename}")
             plt.close()
         else:
             plt.show()
