@@ -30,7 +30,7 @@ LOGISTIC_REGRESSION_MAX_ITER = 200
 
 # Zero-shot model
 ZERO_SHOT_MODEL_NAME = "typeform/distilbert-base-uncased-mnli"  # lighter than bart-large-mnli
-ZERO_SHOT_ENABLED = False  # Disabled by default (slow); enable via CLI/env if needed
+ZERO_SHOT_ENABLED = True  # Force zero-shot by default
 ZERO_SHOT_BATCH_SIZE = 16
 ZERO_SHOT_MAX_LENGTH = 128
 
