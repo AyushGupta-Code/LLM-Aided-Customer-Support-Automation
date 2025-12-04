@@ -27,6 +27,12 @@ Prereqs: Python 3.10+, a virtual environment, and the dataset files `data/manual
    ```
    Metrics for each model/task are printed and saved to `results_summary.csv`.
 
+Visualize the saved metrics (accuracy/precision/recall/F1 for each model and task):
+```
+python src/visualize_results_summary.py
+```
+PNG plots land in `figures/`.
+
 ### Generate TWCS dataset visuals
 Quick EDA plots for the raw `twcs.csv` live in `figures/` (monthly volume, inbound/outbound split, top support handles, inbound tweet lengths):
 ```
