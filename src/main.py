@@ -217,14 +217,11 @@ def _train_rnn_lstm(
     )
 
     # Encode labels if needed
-    label_encoder = None
-    y_train_enc = y_train
-    y_test_enc = y_test
-    if y_train.dtype.kind not in {"i", "u"}:
-        label_encoder = LabelEncoder()
-        label_encoder.fit(list(y_train) + list(y_test))
-        y_train_enc = label_encoder.transform(y_train)
-        y_test_enc = label_encoder.transform(y_test)
+    # Always encode labels to consecutive ints to avoid missing-class issues
+    label_encoder = LabelEncoder()
+    label_encoder.fit(list(y_train) + list(y_test))
+    y_train_enc = label_encoder.transform(y_train)
+    y_test_enc = label_encoder.transform(y_test)
 
     num_classes = len(set(y_train_enc))
     activation = "sigmoid" if num_classes == 2 else "softmax"
