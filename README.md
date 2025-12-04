@@ -31,3 +31,10 @@ Prereqs: Python 3.10+, a virtual environment, Gemini API key, and the dataset fi
    ```
 
 The script labels a subset with Gemini (size set in `src/config.py`), preprocesses, trains, evaluates, saves figures to `figures/`, and stores trained models in `models/`.
+
+### Generate TWCS dataset visuals
+Quick EDA plots for the raw `twcs.csv` live in `figures/` (monthly volume, inbound/outbound split, top support handles, inbound tweet lengths):
+```
+python src/twcs_visualization.py
+```
+Pass `--chunk-size` if you want to override the default 200k rows per batch.
