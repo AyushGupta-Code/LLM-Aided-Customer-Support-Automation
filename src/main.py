@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Dict
+import sys
 
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -24,6 +25,11 @@ from sklearn.model_selection import train_test_split
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import Pipeline
 from sklearn.svm import LinearSVC
+
+# Ensure imports work regardless of CWD (e.g., running from src/).
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src import config, evaluation, preprocessing
 
