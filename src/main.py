@@ -4,8 +4,8 @@ Train five text classification models on manually labeled tweets (no Gemini).
 The script loads `data/manual_labels.csv` as ground truth, preprocesses the
 text, splits into train/test sets, and trains the following models:
   1) Logistic Regression (multinomial, TF-IDF)
-  2) Linear SVM (LinearSVC, TF-IDF)
-  3) SGDClassifier (logistic loss, TF-IDF)
+  2) SGDClassifier (logistic loss, TF-IDF)
+  3) Zero-shot classifier (Bart MNLI)
   4) RNN + Bidirectional LSTM
   5) Multinomial Naive Bayes (TF-IDF)
 
@@ -26,7 +26,6 @@ from sklearn.linear_model import LogisticRegression, SGDClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import Pipeline
-from sklearn.svm import LinearSVC
 from sklearn.preprocessing import LabelEncoder
 
 # Ensure imports work regardless of CWD (e.g., running from src/).
@@ -128,10 +127,62 @@ def _tfidf_vectorizer() -> TfidfVectorizer:
     )
 
 
+class ZeroShotModel:
+    """
+    Zero-shot classifier using a Hugging Face NLI model (e.g., bart-large-mnli).
+    """
+
+    def __init__(self, task_type: str):
+        from transformers import pipeline
+
+        self.task_type = task_type
+        self.model_name = config.ZERO_SHOT_MODEL_NAME
+        self.pipeline = pipeline(
+            "zero-shot-classification",
+            model=self.model_name,
+            device=-1,  # CPU
+        )
+        self.label_map: Dict[str, object] = {}
+        self.candidate_labels: list[str] = []
+
+    def fit(self, X, y):
+        unique_labels = sorted(set(y))
+        self.label_map = {str(lbl): lbl for lbl in unique_labels}
+        self.candidate_labels = list(self.label_map.keys())
+
+    def predict(self, X):
+        results = self.pipeline(
+            list(X),
+            candidate_labels=self.candidate_labels,
+            multi_label=False,
+        )
+        preds = []
+        for res in results:
+            label_str = res["labels"][0]
+            preds.append(self.label_map.get(label_str, label_str))
+        return np.array(preds)
+
+    def predict_proba(self, X):
+        results = self.pipeline(
+            list(X),
+            candidate_labels=self.candidate_labels,
+            multi_label=False,
+        )
+        prob_list = []
+        for res in results:
+            score_by_label = {
+                lbl: score for lbl, score in zip(res["labels"], res["scores"])
+            }
+            probs = [score_by_label.get(lbl, 0.0) for lbl in self.candidate_labels]
+            prob_list.append(probs)
+        return np.array(prob_list)
+
+
 def build_model_registry() -> Dict[str, Pipeline]:
     """
     Create the 5 model definitions:
-      - 4 TF-IDF + linear models
+      - 3 TF-IDF + linear models
+      - 1 Zero-shot classifier (NLI)
       - 1 RNN+LSTM classifier
     """
     return {
@@ -148,12 +199,6 @@ def build_model_registry() -> Dict[str, Pipeline]:
                 ),
             ]
         ),
-        "linear_svc": Pipeline(
-            [
-                ("tfidf", _tfidf_vectorizer()),
-                ("clf", LinearSVC(random_state=config.RANDOM_STATE)),
-            ]
-        ),
         "sgd_log": Pipeline(
             [
                 ("tfidf", _tfidf_vectorizer()),
@@ -167,6 +212,7 @@ def build_model_registry() -> Dict[str, Pipeline]:
                 ),
             ]
         ),
+        "zero_shot": ZeroShotModel(task_type="intent"),
         # Slot formerly used by sgd_hinge replaced with RNN+LSTM
         "rnn_lstm": None,
         "multinomial_nb": Pipeline(
@@ -310,6 +356,18 @@ def train_and_evaluate_models(
         if name == "rnn_lstm":
             metrics = _train_rnn_lstm(X_train, y_train, X_test, y_test, target_col)
             results[name] = metrics
+            continue
+
+        if name == "zero_shot":
+            # Recreate per-task to keep label mapping aligned
+            zs_model = ZeroShotModel(task_type=target_col)
+            zs_model.fit(X_train, y_train)
+            y_pred = zs_model.predict(X_test)
+            y_proba = zs_model.predict_proba(X_test)
+            evaluator = evaluation.ModelEvaluator(task_type=f"{target_col} ({name})")
+            metrics = evaluator.calculate_metrics(y_test, y_pred, y_proba)
+            results[name] = metrics
+            evaluator.print_metrics_summary()
             continue
 
         pipeline.fit(X_train, y_train)

@@ -1,6 +1,6 @@
 # Customer Support Intent/Severity Classification
 
-Classifies customer tweets by intent and severity (0–3) using the manually labeled ground-truth dataset (no Gemini/LLM labeling). Five models are trained: Logistic Regression, Linear SVM, SGD (logistic), RNN + Bidirectional LSTM, and Multinomial Naive Bayes.
+Classifies customer tweets by intent and severity (0–3) using the manually labeled ground-truth dataset (no Gemini/LLM labeling). Five models are trained: Logistic Regression, SGD (logistic), zero-shot (Bart MNLI), RNN + Bidirectional LSTM, and Multinomial Naive Bayes.
 
 ## How to Run
 Prereqs: Python 3.10+, a virtual environment, and the dataset files `data/manual_labels.csv` (ground truth) plus `data/twcs.csv` if you want the optional TWCS visuals (download it manually from Kaggle: Customer Support on Twitter).
