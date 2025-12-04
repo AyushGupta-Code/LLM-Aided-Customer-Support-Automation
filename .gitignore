@@ -57,11 +57,6 @@ data/
 # Results and outputs
 results_*/
 results_*/
-figures/
-*.png
-*.jpg
-*.pdf
-results_summary.csv
 
 # OS
 .DS_Store
