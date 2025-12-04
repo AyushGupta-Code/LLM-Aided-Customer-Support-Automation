@@ -17,6 +17,7 @@ import logging
 from pathlib import Path
 from typing import Dict
 import sys
+import os
 
 import numpy as np
 import pandas as pd
@@ -35,6 +36,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src import config, evaluation, preprocessing
 
+# Force TensorFlow to run on CPU to avoid GPU libdevice/PTX issues in constrained environments.
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
 
 logging.basicConfig(
     level=logging.INFO,
