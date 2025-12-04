@@ -35,8 +35,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src import config, evaluation, preprocessing
 
-# Force TensorFlow to run on CPU to avoid GPU libdevice/PTX issues in constrained environments.
+# Force TensorFlow to run on CPU and keep Transformers off TensorFlow/Keras.
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
+os.environ.setdefault("TRANSFORMERS_NO_FLAX", "1")
+os.environ.setdefault("USE_TF", "0")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -133,6 +136,9 @@ class ZeroShotModel:
     """
 
     def __init__(self, task_type: str):
+        # Force PyTorch backend to avoid tf-keras dependency issues.
+        os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
+        os.environ.setdefault("USE_TF", "0")
         from transformers import pipeline
 
         self.task_type = task_type
@@ -140,6 +146,7 @@ class ZeroShotModel:
         self.pipeline = pipeline(
             "zero-shot-classification",
             model=self.model_name,
+            framework="pt",
             device=-1,  # CPU
         )
         self.label_map: Dict[str, object] = {}
