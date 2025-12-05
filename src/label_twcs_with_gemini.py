@@ -4,9 +4,10 @@ import random
 import sys
 import time
 from pathlib import Path
+from collections import Counter
 
 from transformers import pipeline
-
+import torch  # for GPU detection
 
 # ========= CONFIG =========
 
@@ -16,7 +17,7 @@ TWCSDATA = Path("data/twcs.csv")
 # Output file with labels (existing + new)
 OUTPUT = Path("data/manual_labels.csv")
 
-# How many *new* tweets to label per run
+# How many *new* tweets to actually ADD per run (upper bound)
 N_SAMPLE = 10000  # you can bump this once it works
 
 # Random seed for reproducibility
@@ -25,6 +26,8 @@ SEED = 42
 # Optional small sleep between calls (can be 0, model is local)
 SLEEP_BETWEEN_CALLS = 0.0
 
+# Minimum desired examples per intent (soft target)
+MIN_PER_INTENT = 200
 
 INTENT_LABELS = [
     "technical_issue",
@@ -45,15 +48,21 @@ SEVERITY_SCALE_TEXT = """
 """
 
 
-# ========= LOCAL MODELS =========
+# ========= LOCAL MODEL (GPU-AWARE) =========
 # One model is enough; we'll reuse it for both tasks.
 
 print("Loading local zero-shot classification model (first time may download weights)...")
+
+# Use GPU if available, else CPU
+DEVICE = 0 if torch.cuda.is_available() else -1
+print(f"Using device={DEVICE} for zero-shot model "
+      f"({'GPU' if DEVICE >= 0 else 'CPU'})")
+
 zero_shot = pipeline(
     "zero-shot-classification",
     model="facebook/bart-large-mnli",
-    framework="pt",   # <--- force PyTorch, avoid TensorFlow/Keras
-    device=-1,        # CPU; set to 0 if you have a CUDA GPU
+    framework="pt",   # force PyTorch, avoid TensorFlow/Keras
+    device=DEVICE,    # 0 = first CUDA GPU, -1 = CPU
 )
 
 
@@ -65,6 +74,7 @@ def load_existing_labels(path: Path):
     existing_texts = set()
 
     if not path.exists():
+        print("No existing manual_labels.csv found; starting from scratch.")
         return existing_rows, existing_texts
 
     with path.open(newline="", encoding="utf-8") as f:
@@ -76,6 +86,55 @@ def load_existing_labels(path: Path):
 
     print(f"Loaded {len(existing_rows)} existing labelled tweets.")
     return existing_rows, existing_texts
+
+
+def compute_intent_counts(existing_rows):
+    """Count how many examples we have per intent in existing labels."""
+    intents = [
+        row.get("intent", "")
+        for row in existing_rows
+        if row.get("intent")
+    ]
+    counts = Counter(intents)
+    # Ensure all known labels appear, even if 0
+    for lbl in INTENT_LABELS:
+        counts.setdefault(lbl, 0)
+    return counts
+
+
+def compute_needed_per_intent(intent_counts):
+    """
+    Decide how many new examples to add per intent to improve balance.
+
+    Strategy:
+      - Find the current max count across intents.
+      - Target per-intent count = max(current_max, MIN_PER_INTENT).
+      - For each intent, we want up to (target - current_count) more examples.
+    """
+    if intent_counts:
+        current_max = max(intent_counts.values())
+    else:
+        current_max = 0
+
+    target_per_intent = max(current_max, MIN_PER_INTENT)
+
+    needed = {
+        intent: max(target_per_intent - intent_counts.get(intent, 0), 0)
+        for intent in INTENT_LABELS
+    }
+
+    print("\nCurrent intent counts:")
+    for intent in INTENT_LABELS:
+        print(f"  {intent:15s} = {intent_counts.get(intent, 0)}")
+
+    print(f"\nTarget per intent: {target_per_intent}")
+    print("New examples needed per intent (upper bound):")
+    for intent in INTENT_LABELS:
+        print(f"  {intent:15s} -> {needed[intent]}")
+
+    total_needed = sum(needed.values())
+    print(f"Total extra examples desired (cap before N_SAMPLE): {total_needed}\n")
+    return needed, total_needed
 
 
 def load_all_twcs_rows(path: Path):
@@ -145,10 +204,18 @@ def main():
     # 1) Load existing manual_labels.csv
     existing_rows, existing_texts = load_existing_labels(OUTPUT)
 
-    # 2) Load all TWCS tweets
+    # 2) Check existing balance
+    intent_counts = compute_intent_counts(existing_rows)
+    needed_per_intent, total_needed = compute_needed_per_intent(intent_counts)
+
+    if total_needed == 0:
+        print("Dataset is already balanced up to the current target; nothing to add.")
+        return
+
+    # 3) Load all TWCS tweets
     all_twcs_rows = load_all_twcs_rows(TWCSDATA)
 
-    # 3) Filter out tweets that already exist in manual_labels.csv
+    # 4) Filter out tweets that already exist in manual_labels.csv
     candidate_rows = [
         r for r in all_twcs_rows
         if r["text"] not in existing_texts
@@ -159,40 +226,54 @@ def main():
         return
 
     random.seed(SEED)
+    random.shuffle(candidate_rows)
 
-    # We only need up to N_SAMPLE new tweets this run
-    n_new = min(N_SAMPLE, len(candidate_rows))
-    sampled_new_rows = random.sample(candidate_rows, n_new)
+    # We only need up to N_SAMPLE *and* up to the total_needed to balance
+    max_new_labels = min(N_SAMPLE, total_needed, len(candidate_rows))
 
     print(f"Found {len(candidate_rows)} unique tweets not in manual_labels.csv.")
-    print(f"Sampling {n_new} of them to label locally with BART (zero-shot).")
+    print(f"Will attempt to add up to {max_new_labels} new tweets, "
+          f"prioritizing under-represented intents.")
 
     new_labelled_rows = []
+    processed = 0
 
-    for i, row in enumerate(sampled_new_rows, start=1):
+    for row in candidate_rows:
+        if len(new_labelled_rows) >= max_new_labels:
+            break
+
         text = row["text"]
 
         try:
             intent, severity = call_local_label(text)
         except Exception as e:
-            print(f"[ERROR] Local model failed at new row {i}: {e}", file=sys.stderr)
+            print(f"[ERROR] Local model failed at new row {processed}: {e}", file=sys.stderr)
             intent, severity = "other", 2
 
-        new_labelled_rows.append(
-            {
-                "text": text,
-                "intent": intent,
-                "severity": severity,
-            }
-        )
+        # Only accept if that intent still needs more examples
+        if needed_per_intent.get(intent, 0) > 0:
+            new_labelled_rows.append(
+                {
+                    "text": text,
+                    "intent": intent,
+                    "severity": severity,
+                }
+            )
+            needed_per_intent[intent] -= 1
 
-        if i % 20 == 0:
-            print(f"Labelled {i}/{n_new} new tweets...")
+            if len(new_labelled_rows) % 20 == 0:
+                print(f"Accepted {len(new_labelled_rows)}/{max_new_labels} new tweets...")
+
+        processed += 1
 
         if SLEEP_BETWEEN_CALLS > 0:
             time.sleep(SLEEP_BETWEEN_CALLS)
 
-    # 4) Rewrite manual_labels.csv with existing + new unique rows
+    if not new_labelled_rows:
+        print("No suitable new tweets were found to improve class balance.")
+        return
+
+    # 5) Rewrite manual_labels.csv with existing + new unique rows
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     with OUTPUT.open("w", newline="", encoding="utf-8") as f_out:
         fieldnames = ["text", "intent", "severity"]
@@ -213,9 +294,16 @@ def main():
         for row in new_labelled_rows:
             writer.writerow(row)
 
-    print(f"Done. manual_labels.csv now has {len(existing_rows) + len(new_labelled_rows)} rows.")
+    new_total = len(existing_rows) + len(new_labelled_rows)
+    print(f"\nDone. manual_labels.csv now has {new_total} rows.")
     print(f"  - Existing rows kept: {len(existing_rows)}")
     print(f"  - New unique rows added this run: {len(new_labelled_rows)}")
+
+    # Show new intent counts after augmentation
+    final_counts = compute_intent_counts(existing_rows + new_labelled_rows)
+    print("\nFinal intent counts after augmentation:")
+    for intent in INTENT_LABELS:
+        print(f"  {intent:15s} = {final_counts[intent]}")
 
 
 if __name__ == "__main__":

@@ -5,19 +5,27 @@ The script loads `data/manual_labels.csv` as ground truth, preprocesses the
 text, splits into train/test sets, and trains the following models:
   1) Logistic Regression (multinomial, TF-IDF)
   2) SGDClassifier (logistic loss, TF-IDF)
-  3) Zero-shot classifier (DistilBERT MNLI)
+  3) Zero-shot classifier (NLI model)
   4) RNN + Bidirectional LSTM
   5) Multinomial Naive Bayes (TF-IDF)
 
 Results are printed and saved to `results_summary.csv`.
+
+After training:
+  - It selects the best overall model (by f1_macro averaged over intent + severity).
+  - Randomly picks one tweet from the dataset.
+  - Predicts intent & severity for that tweet with the best model.
+  - If Gemini is available, generates a reply to that tweet.
+  - Prints: the tweet being answered, the answer, and the model used.
 """
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Tuple, Any
 import sys
 import os
+import random
 
 import numpy as np
 import pandas as pd
@@ -35,8 +43,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src import config, evaluation, preprocessing
 
-# Force TensorFlow to run on CPU and keep Transformers off TensorFlow/Keras.
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+# -----------------------------------------------------------------------------
+# Environment configuration (GPU-friendly)
+# -----------------------------------------------------------------------------
+# These only affect Hugging Face Transformers, keeping them on PyTorch.
 os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
 os.environ.setdefault("TRANSFORMERS_NO_FLAX", "1")
 os.environ.setdefault("USE_TF", "0")
@@ -54,6 +64,10 @@ logger = logging.getLogger(__name__)
 def load_manual_labels(path: Path | str | None = None) -> pd.DataFrame:
     """
     Load manually labeled tweets and apply preprocessing.
+
+    Keeps both:
+      - text_raw: original tweet text
+      - text: preprocessed text for modeling
     """
     data_path = Path(path) if path else config.MANUAL_LABELS_PATH
     if not data_path.exists():
@@ -71,6 +85,10 @@ def load_manual_labels(path: Path | str | None = None) -> pd.DataFrame:
     df = df.dropna(subset=["text", "intent", "severity"]).copy()
     df["severity"] = df["severity"].astype(int)
 
+    # Preserve original text
+    df["text_raw"] = df["text"].astype(str)
+
+    # Preprocess for modeling
     df = preprocessing.preprocess_dataframe(df, text_column="text")
     df["text"] = df["text_processed"]
     df = df.drop(columns=["text_processed"])
@@ -133,13 +151,24 @@ def _tfidf_vectorizer() -> TfidfVectorizer:
 class ZeroShotModel:
     """
     Zero-shot classifier using a Hugging Face NLI model (e.g., bart-large-mnli).
+
+    Uses PyTorch and will run on GPU (device=0) if available, otherwise CPU.
     """
 
     def __init__(self, task_type: str):
-        # Force PyTorch backend to avoid tf-keras dependency issues.
+        # Keep Transformers on PyTorch backend (not TensorFlow).
         os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
         os.environ.setdefault("USE_TF", "0")
+
         from transformers import pipeline
+
+        # Try to use GPU if torch + CUDA are available
+        try:
+            import torch
+
+            device = 0 if torch.cuda.is_available() else -1
+        except ImportError:
+            device = -1
 
         self.task_type = task_type
         self.model_name = config.ZERO_SHOT_MODEL_NAME
@@ -147,13 +176,19 @@ class ZeroShotModel:
             "zero-shot-classification",
             model=self.model_name,
             framework="pt",
-            device=-1,  # CPU
+            device=device,  # 0 for GPU if available, else -1 for CPU
             batch_size=getattr(config, "ZERO_SHOT_BATCH_SIZE", 8),
             truncation=True,
             max_length=getattr(config, "ZERO_SHOT_MAX_LENGTH", 128),
         )
         self.label_map: Dict[str, object] = {}
         self.candidate_labels: list[str] = []
+
+        logger.info(
+            "Initialized ZeroShotModel for task '%s' using device=%s",
+            self.task_type,
+            device,
+        )
 
     def fit(self, X, y):
         unique_labels = sorted(set(y))
@@ -188,12 +223,57 @@ class ZeroShotModel:
         return np.array(prob_list)
 
 
-def build_model_registry() -> Dict[str, Pipeline]:
+class RnnLstmTextClassifier:
+    """
+    Thin wrapper around Keras model + tokenizer + label encoder
+    to expose a scikit-like predict / predict_proba API for new texts.
+    """
+
+    def __init__(self, tokenizer, label_encoder, model, max_seq_len: int, num_classes: int):
+        self.tokenizer = tokenizer
+        self.label_encoder = label_encoder
+        self.model = model
+        self.max_seq_len = max_seq_len
+        self.num_classes = num_classes
+
+        from tensorflow.keras.preprocessing.sequence import pad_sequences  # type: ignore
+        self._pad_sequences = pad_sequences
+
+    def _texts_to_seq(self, texts):
+        seqs = self.tokenizer.texts_to_sequences(texts)
+        return self._pad_sequences(
+            seqs,
+            maxlen=self.max_seq_len,
+            padding="post",
+            truncating="post",
+        )
+
+    def predict_proba(self, X):
+        X_seq = self._texts_to_seq(list(X))
+        proba = self.model.predict(X_seq, verbose=0)
+        if self.num_classes == 2:
+            scores = proba.flatten()
+            proba_full = np.vstack([1 - scores, scores]).T
+            return proba_full
+        return proba
+
+    def predict(self, X):
+        proba = self.predict_proba(X)
+        if self.num_classes == 2:
+            scores = proba[:, 1]
+            y_enc = (scores >= 0.5).astype(int)
+        else:
+            y_enc = proba.argmax(axis=1)
+        labels = self.label_encoder.inverse_transform(y_enc)
+        return np.array(labels)
+
+
+def build_model_registry() -> Dict[str, Any]:
     """
     Create the 5 model definitions:
       - 3 TF-IDF + linear models
       - 1 Zero-shot classifier (NLI)
-      - 1 RNN+LSTM classifier
+      - 1 RNN+LSTM classifier (trained separately)
     """
     return {
         "log_reg": Pipeline(
@@ -223,8 +303,7 @@ def build_model_registry() -> Dict[str, Pipeline]:
             ]
         ),
         "zero_shot": ZeroShotModel(task_type="intent"),
-        # Slot formerly used by sgd_hinge replaced with RNN+LSTM
-        "rnn_lstm": None,
+        "rnn_lstm": None,  # placeholder, trained separately
         "multinomial_nb": Pipeline(
             [
                 ("tfidf", _tfidf_vectorizer()),
@@ -240,9 +319,12 @@ def _train_rnn_lstm(
     X_test,
     y_test,
     task_name: str,
-):
+) -> Tuple[Dict[str, float], RnnLstmTextClassifier]:
     """
     Train a simple RNN+Bidirectional LSTM classifier.
+
+    Will use GPU if available (no manual disabling).
+    Returns metrics and a RnnLstmTextClassifier object.
     """
     try:
         import tensorflow as tf
@@ -253,8 +335,20 @@ def _train_rnn_lstm(
     except ImportError as exc:
         raise ImportError(
             "TensorFlow is required for the RNN+LSTM model. "
-            "Install it via `pip install tensorflow`."
+            "Install it via `pip install tensorflow[and-cuda]`."
         ) from exc
+
+    # Try to enable GPU + memory growth
+    gpus = tf.config.list_physical_devices("GPU")
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            logger.info("Using GPU(s) for RNN+LSTM: %s", gpus)
+        except Exception as e:  # pragma: no cover - best-effort only
+            logger.warning("Could not set memory growth on GPUs: %s", e)
+    else:
+        logger.warning("No GPU detected by TensorFlow, running RNN+LSTM on CPU.")
 
     # Tokenize
     tokenizer = Tokenizer(num_words=config.RNN_MAX_VOCAB_SIZE, oov_token="<OOV>")
@@ -272,8 +366,7 @@ def _train_rnn_lstm(
         truncating="post",
     )
 
-    # Encode labels if needed
-    # Always encode labels to consecutive ints to avoid missing-class issues
+    # Encode labels
     label_encoder = LabelEncoder()
     label_encoder.fit(list(y_train) + list(y_test))
     y_train_enc = label_encoder.transform(y_train)
@@ -320,7 +413,7 @@ def _train_rnn_lstm(
         verbose=0,
     )
 
-    # Predictions
+    # Predictions for metrics
     proba = model.predict(X_test_seq, verbose=0)
     if num_classes == 2:
         scores = proba.flatten()
@@ -330,23 +423,32 @@ def _train_rnn_lstm(
         y_pred_enc = proba.argmax(axis=1)
         y_proba = proba
 
-    if label_encoder:
-        y_pred = label_encoder.inverse_transform(y_pred_enc)
-    else:
-        y_pred = y_pred_enc
+    y_pred = label_encoder.inverse_transform(y_pred_enc)
 
     evaluator = evaluation.ModelEvaluator(task_type=f"{task_name} (rnn_lstm)")
     metrics = evaluator.calculate_metrics(y_test, y_pred, y_proba)
     evaluator.print_metrics_summary()
-    return metrics
+
+    clf = RnnLstmTextClassifier(
+        tokenizer=tokenizer,
+        label_encoder=label_encoder,
+        model=model,
+        max_seq_len=config.MAX_SEQUENCE_LENGTH,
+        num_classes=num_classes,
+    )
+    return metrics, clf
 
 
 def train_and_evaluate_models(
     labeled_df: pd.DataFrame,
     target_col: str,
-) -> Dict[str, Dict[str, float]]:
+) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Any]]:
     """
     Train/evaluate all registered models for a given target column.
+
+    Returns:
+        results:  model_name -> metrics dict
+        models:   model_name -> fitted model object (Pipeline, ZeroShotModel, RnnLstmTextClassifier)
     """
     X = labeled_df["text"].values
     y = labeled_df[target_col].values
@@ -360,17 +462,19 @@ def train_and_evaluate_models(
     )
 
     results: Dict[str, Dict[str, float]] = {}
+    models: Dict[str, Any] = {}
+
     registry = build_model_registry()
-    for name, pipeline in registry.items():
+    for name, pipeline_obj in registry.items():
         logger.info("Training %s model: %s", target_col, name)
 
         if name == "rnn_lstm":
-            metrics = _train_rnn_lstm(X_train, y_train, X_test, y_test, target_col)
+            metrics, clf = _train_rnn_lstm(X_train, y_train, X_test, y_test, target_col)
             results[name] = metrics
+            models[name] = clf
             continue
 
         if name == "zero_shot":
-            # Recreate per-task to keep label mapping aligned
             zs_model = ZeroShotModel(task_type=target_col)
             zs_model.fit(X_train, y_train)
             y_pred = zs_model.predict(X_test)
@@ -378,25 +482,28 @@ def train_and_evaluate_models(
             evaluator = evaluation.ModelEvaluator(task_type=f"{target_col} ({name})")
             metrics = evaluator.calculate_metrics(y_test, y_pred, y_proba)
             results[name] = metrics
+            models[name] = zs_model
             evaluator.print_metrics_summary()
             continue
 
-        pipeline.fit(X_train, y_train)
-        y_pred = pipeline.predict(X_test)
+        # Classical models
+        pipeline_obj.fit(X_train, y_train)
+        y_pred = pipeline_obj.predict(X_test)
 
         y_proba = None
-        if hasattr(pipeline, "predict_proba"):
+        if hasattr(pipeline_obj, "predict_proba"):
             try:
-                y_proba = pipeline.predict_proba(X_test)
+                y_proba = pipeline_obj.predict_proba(X_test)
             except Exception as exc:  # pragma: no cover - best-effort only
                 logger.warning("No probabilities for %s: %s", name, exc)
 
         evaluator = evaluation.ModelEvaluator(task_type=f"{target_col} ({name})")
         metrics = evaluator.calculate_metrics(y_test, y_pred, y_proba)
         results[name] = metrics
+        models[name] = pipeline_obj
         evaluator.print_metrics_summary()
 
-    return results
+    return results, models
 
 
 def save_results(intent_results: Dict[str, Dict[str, float]], severity_results: Dict[str, Dict[str, float]]) -> Path:
@@ -416,18 +523,168 @@ def save_results(intent_results: Dict[str, Dict[str, float]], severity_results: 
     return out_path
 
 
+# -----------------------------------------------------------------------------
+# Best model selection + Gemini answering
+# -----------------------------------------------------------------------------
+def select_best_overall_model(
+    intent_results: Dict[str, Dict[str, float]],
+    severity_results: Dict[str, Dict[str, float]],
+    metric: str = "f1_macro",
+) -> str:
+    """
+    Pick the single best model across the 5 by averaging a given metric
+    (e.g., f1_macro) over intent + severity tasks.
+    """
+    scores = {}
+    for model_name in intent_results.keys():
+        intent_score = intent_results.get(model_name, {}).get(metric, 0.0)
+        severity_score = severity_results.get(model_name, {}).get(metric, 0.0)
+        scores[model_name] = (intent_score + severity_score) / 2.0
+
+    best_model = max(scores, key=scores.get)
+    logger.info(
+        "Best overall model by %s: %s (score=%.4f)",
+        metric,
+        best_model,
+        scores[best_model],
+    )
+    return best_model
+
+
+def get_gemini_model():
+    """
+    Initialize Gemini client if possible.
+
+    Returns a configured GenerativeModel, or None if:
+      - API key is missing, or
+      - google-generativeai is not installed.
+    """
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        logger.warning(
+            "Gemini API key not found. Set GEMINI_API_KEY or GOOGLE_API_KEY "
+            "in your environment. Skipping answer generation."
+        )
+        return None
+
+    try:
+        import google.generativeai as genai  # type: ignore
+    except ImportError:
+        logger.warning(
+            "google-generativeai package not installed. "
+            "Install it via `pip install google-generativeai` to enable Gemini answers."
+        )
+        return None
+
+    genai.configure(api_key=api_key)
+    model_name = getattr(config, "GEMINI_MODEL_NAME", "gemini-1.5-pro")
+    model = genai.GenerativeModel(model_name)
+    logger.info("Initialized Gemini model '%s' for answer generation.", model_name)
+    return model
+
+
+def generate_gemini_answer(gemini_model, tweet: str, intent: str, severity: int) -> str:
+    """
+    Use a configured Gemini model to generate a customer support reply.
+    """
+    sev_text = {
+        1: "low (non-urgent, general question, casual feedback)",
+        2: "medium (inconvenient, but service basically works)",
+        3: "high (blocking/critical, user is very frustrated)",
+    }.get(int(severity), "unknown")
+
+    prompt = f"""
+You are a helpful and empathetic customer support agent.
+
+User tweet:
+"{tweet}"
+
+Predicted intent: {intent}
+Predicted severity: {severity} - {sev_text}
+
+Write a concise, friendly, and professional reply to this tweet:
+- Acknowledge the issue or feedback.
+- Be empathetic.
+- If it's high severity, show urgency.
+- Do NOT mention that an AI model or intent classifier was used.
+- Keep it within 2–3 sentences max.
+"""
+
+    response = gemini_model.generate_content(prompt)
+    text = getattr(response, "text", None)
+    if text is None and hasattr(response, "candidates") and response.candidates:
+        text = response.candidates[0].content.parts[0].text
+    if text is None:
+        text = ""
+    return text.strip()
+
+
+def answer_random_tweet(
+    labeled_df: pd.DataFrame,
+    intent_results: Dict[str, Dict[str, float]],
+    severity_results: Dict[str, Dict[str, float]],
+    intent_models: Dict[str, Any],
+    severity_models: Dict[str, Any],
+):
+    """
+    Randomly pick one tweet from the dataset, classify it with the best model,
+    generate a Gemini response (if possible), and print:
+      Tweet : ...
+      Answer: ...
+      Model : ...
+    """
+    gemini_model = get_gemini_model()
+    if gemini_model is None:
+        return  # already logged reason; nothing else to do
+
+    best_model_name = select_best_overall_model(intent_results, severity_results, metric="f1_macro")
+
+    intent_model = intent_models[best_model_name]
+    severity_model = severity_models[best_model_name]
+
+    # Randomly sample one row
+    idx = random.randint(0, len(labeled_df) - 1)
+    row = labeled_df.iloc[idx]
+
+    tweet_raw = row.get("text_raw", row["text"])
+    tweet_processed = row["text"]
+
+    intent_pred = intent_model.predict([tweet_processed])[0]
+    severity_pred = severity_model.predict([tweet_processed])[0]
+    severity_pred_int = int(severity_pred)
+
+    answer = generate_gemini_answer(gemini_model, tweet_raw, intent_pred, severity_pred_int)
+
+    # Exactly the 3 fields requested
+    print(f"Tweet : {tweet_raw}")
+    print(f"Answer: {answer}")
+    print(f"Model : {best_model_name}")
+
+
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
 def main():
     labeled_df = load_manual_labels()
     logger.info("Starting training on manual labels (no Gemini).")
 
-    intent_results = train_and_evaluate_models(
+    intent_results, intent_models = train_and_evaluate_models(
         labeled_df, target_col="intent"
     )
-    severity_results = train_and_evaluate_models(
+    severity_results, severity_models = train_and_evaluate_models(
         labeled_df, target_col="severity"
     )
 
     save_results(intent_results, severity_results)
+
+    # Randomly choose a tweet from the dataset and answer it (if Gemini is available)
+    answer_random_tweet(
+        labeled_df=labeled_df,
+        intent_results=intent_results,
+        severity_results=severity_results,
+        intent_models=intent_models,
+        severity_models=severity_models,
+    )
 
 
 if __name__ == "__main__":
