@@ -17,7 +17,7 @@ TWCSDATA = Path("data/twcs.csv")
 OUTPUT = Path("data/manual_labels.csv")
 
 # How many *new* tweets to label per run
-N_SAMPLE = 500  # you can bump this once it works
+N_SAMPLE = 10000  # you can bump this once it works
 
 # Random seed for reproducibility
 SEED = 42

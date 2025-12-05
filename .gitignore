@@ -53,6 +53,7 @@ logs/
 
 # Data
 data/
+twcs.csv
 
 # Results and outputs
 results_*/
